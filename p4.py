@@ -1,11 +1,11 @@
 import PyPDF2
 import subprocess
 import os
-from pydub import AudioSegment
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import tempfile
 import time
+import struct
 
 def extract_sentences_from_pdf(pdf_path):
     """
@@ -44,13 +44,13 @@ def extract_sentences_from_pdf(pdf_path):
 def generate_audio_to_memory(args):
     """
     1つの文章を音声データとしてメモリに生成する（並列処理用）
-    一時ファイルを使用するが、即座にメモリに読み込んで削除
+    WAVファイルをバイナリデータとして返す
     
     Args:
         args (tuple): (index, sentence, voice)
     
     Returns:
-        tuple: (success, index, audio_segment, error_message)
+        tuple: (success, index, wav_bytes, error_message)
     """
     i, sentence, voice = args
     
@@ -61,18 +61,19 @@ def generate_audio_to_memory(args):
     try:
         # sayコマンドで一時ファイルに出力
         subprocess.run(
-            ["say","-r", "400", "-v", voice, "-o", tmp_path, "--data-format=LEF32@22050", sentence],
+            ["say", "-r", "400", "-v", voice, "-o", tmp_path, "--data-format=LEF32@22050", sentence],
             check=True,
             capture_output=True
         )
         
-        # 一時ファイルをメモリに読み込み
-        audio_segment = AudioSegment.from_wav(tmp_path)
+        # WAVファイルをバイナリとして読み込み
+        with open(tmp_path, 'rb') as f:
+            wav_bytes = f.read()
         
         # 一時ファイルを削除
         os.unlink(tmp_path)
         
-        return (True, i, audio_segment, None)
+        return (True, i, wav_bytes, None)
     
     except subprocess.CalledProcessError as e:
         # エラー時も一時ファイルを削除
@@ -88,7 +89,7 @@ def generate_audio_to_memory(args):
 
 def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None):
     """
-    文章リストをsayコマンドで音声データに並列変換（メモリ上で処理）
+    文章リストをsayコマンドで音声データに並列変換（バイナリで保持）
     
     Args:
         sentences (list): 文章のリスト
@@ -96,7 +97,7 @@ def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None)
         max_workers (int): 並列実行するワーカー数（Noneの場合はCPUコア数）
     
     Returns:
-        list: AudioSegmentオブジェクトのリスト（順序保持）
+        list: WAVファイルのバイト列リスト（順序保持）
     """
     # ワーカー数の決定
     if max_workers is None:
@@ -104,12 +105,12 @@ def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None)
     
     print(f"\n音声データの生成を開始します（全{len(sentences)}ファイル）...")
     print(f"並列処理: {max_workers}ワーカーを使用")
-    print(f"方式: 一時ファイル経由でメモリに即座に読み込み\n")
+    print(f"方式: バイナリデータとしてメモリに保持\n")
     
     # 並列処理用の引数リストを作成
     tasks = [(i, sentence, voice) for i, sentence in enumerate(sentences)]
     
-    audio_segments = [None] * len(sentences)  # インデックス順を保持するためのリスト
+    wav_bytes_list = [None] * len(sentences)  # インデックス順を保持するためのリスト
     completed = 0
     failed = 0
     
@@ -121,12 +122,13 @@ def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None)
         
         # 完了したタスクから順次処理
         for future in as_completed(future_to_index):
-            success, index, audio_segment, error_msg = future.result()
+            success, index, wav_bytes, error_msg = future.result()
             completed += 1
             
             if success:
-                audio_segments[index] = audio_segment
-                print(f"✓ [{completed}/{len(sentences)}] 生成完了: 文章 {index}")
+                wav_bytes_list[index] = wav_bytes
+                if completed % 100 == 0:  # 100件ごとに表示
+                    print(f"✓ [{completed}/{len(sentences)}] 生成完了")
             else:
                 failed += 1
                 print(f"✗ [{completed}/{len(sentences)}] エラー: 文章 {index} - {error_msg}")
@@ -135,67 +137,115 @@ def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None)
     print(f"成功: {len(sentences) - failed}ファイル, 失敗: {failed}ファイル")
     
     # Noneを除外（失敗したファイル）
-    audio_segments = [seg for seg in audio_segments if seg is not None]
+    wav_bytes_list = [data for data in wav_bytes_list if data is not None]
     
-    return audio_segments
+    return wav_bytes_list
 
 
-def save_individual_files(audio_segments, output_dir="out"):
+def concatenate_wav_binary(wav_bytes_list, output_filename):
     """
-    メモリ上の音声データをファイルとして保存（オプション）
+    WAVファイルのバイナリデータを直接連結（超高速）
     
     Args:
-        audio_segments (list): AudioSegmentオブジェクトのリスト
-        output_dir (str): 出力ディレクトリ
-    """
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    print(f"\n個別ファイルを保存中...")
-    
-    for i, segment in enumerate(audio_segments):
-        output_file = os.path.join(output_dir, f"{i}.wav")
-        segment.export(output_file, format="wav")
-        if (i + 1) % 10 == 0:
-            print(f"  {i + 1}/{len(audio_segments)} ファイル保存済み...")
-    
-    print(f"✓ 個別ファイルの保存が完了しました: {output_dir}/")
-
-
-def concatenate_audio_segments(audio_segments, output_filename):
-    """
-    メモリ上の音声データを連結して1つのファイルにする
-    
-    Args:
-        audio_segments (list): AudioSegmentオブジェクトのリスト
+        wav_bytes_list (list): WAVファイルのバイト列リスト
         output_filename (str): 出力ファイル名
     """
-    if not audio_segments:
+    if not wav_bytes_list:
         print("連結するデータがありません。")
         return
     
-    print(f"\n音声データを連結中...")
+    print(f"\nWAVファイルをバイナリレベルで連結中...")
+    print(f"方式: ヘッダー除去 + バイト列連結（超高速）")
     
     try:
-        # 最初のセグメント
-        combined = audio_segments[0]
+        start_time = time.time()
         
-        # 残りのセグメントを順番に連結
-        for i, segment in enumerate(audio_segments[1:], 1):
-            combined += segment
-            if (i) % 100 == 0:  # 100ファイルごとに進捗表示
-                print(f"  {i}/{len(audio_segments)-1} セグメント連結済み...")
+        # 最初のファイルからヘッダー情報を取得
+        first_wav = wav_bytes_list[0]
         
-        # 連結したファイルを保存
+        # WAVヘッダーを解析（RIFF形式）
+        # 参考: http://soundfile.sapp.org/doc/WaveFormat/
+        
+        # RIFFヘッダーを確認
+        if first_wav[:4] != b'RIFF':
+            raise ValueError("最初のファイルが有効なWAVファイルではありません")
+        
+        # fmtチャンクを探す（通常は12バイト目から）
+        fmt_index = first_wav.find(b'fmt ')
+        data_index = first_wav.find(b'data')
+        
+        if fmt_index == -1 or data_index == -1:
+            raise ValueError("WAVファイルのフォーマットが不正です")
+        
+        # dataチャンクのヘッダーサイズを取得（通常44バイト）
+        header_size = data_index + 8  # 'data' + サイズ(4バイト) = 8バイト
+        
+        print(f"  ヘッダーサイズ: {header_size}バイト")
+        print(f"  連結対象: {len(wav_bytes_list)}ファイル")
+        
+        # 最初のファイルのヘッダーを保持
+        header = first_wav[:header_size]
+        
+        # 全てのPCMデータを連結
+        pcm_data = bytearray()
+        
+        for i, wav_bytes in enumerate(wav_bytes_list):
+            # 各ファイルのdataチャンクを探す
+            file_data_index = wav_bytes.find(b'data')
+            if file_data_index == -1:
+                print(f"  警告: ファイル{i}のdataチャンクが見つかりません。スキップします。")
+                continue
+            
+            file_header_size = file_data_index + 8
+            pcm_data.extend(wav_bytes[file_header_size:])
+            
+            if (i + 1) % 500 == 0:
+                print(f"  {i + 1}/{len(wav_bytes_list)} ファイル処理済み...")
+        
+        concat_time = time.time() - start_time
+        print(f"  バイト列連結完了: {concat_time:.2f}秒")
+        
+        # 新しいヘッダーを作成（ファイルサイズを更新）
+        total_data_size = len(pcm_data)
+        total_file_size = header_size - 8 + total_data_size  # RIFF識別子とサイズフィールドを除く
+        
+        # ヘッダーを更新
+        new_header = bytearray(header)
+        
+        # RIFFチャンクサイズを更新（4〜7バイト目）
+        new_header[4:8] = struct.pack('<I', total_file_size)
+        
+        # dataチャンクサイズを更新（dataチャンク位置+4バイト目から4バイト）
+        data_size_offset = data_index + 4
+        new_header[data_size_offset:data_size_offset+4] = struct.pack('<I', total_data_size)
+        
+        # ファイルに書き出し
         print(f"\n最終ファイルを書き出し中...")
-        combined.export(output_filename, format="wav")
+        write_start = time.time()
+        
+        with open(output_filename, 'wb') as f:
+            f.write(new_header)
+            f.write(pcm_data)
+        
+        write_time = time.time() - write_start
+        total_time = time.time() - start_time
+        
+        # 再生時間を計算（32bit float @ 22050Hz = 4バイト/サンプル）
+        duration_seconds = total_data_size / (4 * 22050)
         
         print(f"✓ 連結完了: {output_filename}")
         print(f"  ファイルサイズ: {os.path.getsize(output_filename) / (1024*1024):.2f} MB")
-        print(f"  再生時間: {len(combined) / 1000 / 60:.2f} 分")
-    
+        print(f"  PCMデータサイズ: {total_data_size / (1024*1024):.2f} MB")
+        print(f"  再生時間: {duration_seconds / 60:.2f} 分")
+        print(f"\n  処理時間内訳:")
+        print(f"    バイト列連結: {concat_time:.2f}秒")
+        print(f"    ファイル書き出し: {write_time:.2f}秒")
+        print(f"    合計: {total_time:.2f}秒")
+        
     except Exception as e:
         print(f"✗ 連結エラー: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # 使用例
@@ -227,18 +277,16 @@ if __name__ == "__main__":
         # 処理時間を計測
         start_time = time.time()
         
-        # 音声データをメモリ上で並列生成
-        audio_segments = convert_to_audio_parallel_memory(sentences, max_workers=None)
+        # 音声データをバイナリとして並列生成
+        wav_bytes_list = convert_to_audio_parallel_memory(sentences, max_workers=None)
         
         generation_time = time.time() - start_time
         
-        if audio_segments:
-            # オプション: 個別ファイルとして保存する場合
-            # save_individual_files(audio_segments, output_dir="out")
-            
-            # 音声データを連結して保存
+        if wav_bytes_list:
             output_filename = f"{pdf_file}.wav"
-            concatenate_audio_segments(audio_segments, output_filename)
+            
+            # バイナリレベルで超高速連結
+            concatenate_wav_binary(wav_bytes_list, output_filename)
             
             total_time = time.time() - start_time
             
