@@ -61,7 +61,7 @@ def generate_audio_to_memory(args):
     try:
         # sayコマンドで一時ファイルに出力
         subprocess.run(
-            ["say", "-r", "400", "-v", voice, "-o", tmp_path, "--data-format=LEF32@22050", sentence],
+            ["say", "-r", "520", "-v", voice, "-o", tmp_path, "--data-format=LEF32@22050", sentence],
             check=True,
             capture_output=True
         )

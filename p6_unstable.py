@@ -66,7 +66,7 @@ async def generate_audio_to_memory_voicevox(
             async with session.post(
                 f"{voicevox_url}/audio_query",
                 params={"text": sentence, "speaker": speaker_id},
-                timeout=aiohttp.ClientTimeout(total=60)
+                timeout=aiohttp.ClientTimeout(total=6000)
             ) as response:
                 response.raise_for_status()
                 query_data = await response.json()
@@ -76,7 +76,7 @@ async def generate_audio_to_memory_voicevox(
                 f"{voicevox_url}/synthesis",
                 params={"speaker": speaker_id},
                 json=query_data,
-                timeout=aiohttp.ClientTimeout(total=60)
+                timeout=aiohttp.ClientTimeout(total=6000)
             ) as response:
                 response.raise_for_status()
                 wav_bytes = await response.read()
@@ -306,7 +306,7 @@ async def main():
         generation_time = time.time() - start_time
         
         if wav_bytes_list:
-            output_filename = f"{pdf_file}_voicevox.wav"
+            output_filename = f"{pdf_file}_voicevox2.wav"
             
             # バイナリレベルで超高速連結
             concatenate_wav_binary(wav_bytes_list, output_filename)

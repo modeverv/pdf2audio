@@ -58,17 +58,19 @@ def generate_audio_to_memory_voicevox(args):
         query_response = requests.post(
             f"{voicevox_url}/audio_query",
             params={"text": sentence, "speaker": speaker_id},
-            timeout=10
+            timeout=100
         )
         query_response.raise_for_status()
         query_data = query_response.json()
+        query_data["speedScale"] = 3
+        query_data["intonationScale"] = 1.3
         
         # Step 2: 音声合成を実行してWAVバイナリを取得（メモリ上）
         synthesis_response = requests.post(
             f"{voicevox_url}/synthesis",
             params={"speaker": speaker_id},
             json=query_data,
-            timeout=30
+            timeout=300
         )
         synthesis_response.raise_for_status()
         
@@ -99,7 +101,7 @@ def convert_to_audio_parallel_memory_voicevox(sentences, voicevox_url="http://12
     """
     # ワーカー数の決定
     if max_workers is None:
-        max_workers = 10#multiprocessing.cpu_count()
+        max_workers = 7#multiprocessing.cpu_count()
     
     print(f"\n音声データの生成を開始します（全{len(sentences)}ファイル）...")
     print(f"VoiceVoxサーバー: {voicevox_url}")
@@ -258,7 +260,8 @@ if __name__ == "__main__":
     
     # VoiceVox設定
     VOICEVOX_URL = "http://127.0.0.1:50021"  # ローカル or LANのWindowsマシン
-    SPEAKER_ID = 1  # 1=ずんだもん（ノーマル）
+    #SPEAKER_ID = 1  # 1=ずんだもん（ノーマル）
+    SPEAKER_ID = 6
     
     # 文章を抽出
     print("PDFから文章を抽出中...")
