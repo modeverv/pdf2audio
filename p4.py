@@ -1,4 +1,4 @@
-import PyPDF2
+import pdfplumber
 import subprocess
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -6,6 +6,7 @@ import multiprocessing
 import tempfile
 import time
 import struct
+import sys
 
 def extract_sentences_from_pdf(pdf_path):
     """
@@ -20,19 +21,17 @@ def extract_sentences_from_pdf(pdf_path):
     sentences = []
     
     try:
-        # PDFファイルを開く
-        with open(pdf_path, 'rb') as file:
-            # PDFリーダーオブジェクトを作成
-            pdf_reader = PyPDF2.PdfReader(file)
-            
-            # 全ページからテキストを抽出
+        with pdfplumber.open(pdf_path) as pdf:
             full_text = ""
-            for page in pdf_reader.pages:
-                full_text += page.extract_text()
-            
+            for page in pdf.pages:
+               full_text += page.extract_text()
+               
             # 句点（。）で分割
             sentences = [s.strip() + '。' for s in full_text.split('。') if s.strip()]
-    
+
+            with open(pdf_path + ".txt", 'w', encoding='utf-8') as file:
+                file.write("\n".join(sentences))
+
     except FileNotFoundError:
         print(f"エラー: ファイル '{pdf_path}' が見つかりません。")
     except Exception as e:
@@ -101,7 +100,7 @@ def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None)
     """
     # ワーカー数の決定
     if max_workers is None:
-        max_workers = multiprocessing.cpu_count()
+        max_workers = multiprocessing.cpu_count() - 2
     
     print(f"\n音声データの生成を開始します（全{len(sentences)}ファイル）...")
     print(f"並列処理: {max_workers}ワーカーを使用")
@@ -245,13 +244,15 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
     except Exception as e:
         print(f"✗ 連結エラー: {e}")
         import traceback
-        traceback.print_exc()
-
 
 # 使用例
 if __name__ == "__main__":
     # PDFファイルのパスを指定
-    pdf_file = "sample.pdf"
+    if len(sys.argv) < 2:
+        print("使用方法: python p4.py <PDFファイル名>")
+        sys.exit(1)
+    
+    pdf_file = sys.argv[1]
     
     # 文章を抽出
     print("PDFから文章を抽出中...")
