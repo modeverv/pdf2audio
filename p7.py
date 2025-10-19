@@ -3,7 +3,6 @@ import subprocess
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
-import tempfile
 import time
 import struct
 import sys
@@ -43,7 +42,7 @@ def extract_sentences_from_pdf(pdf_path):
 def generate_audio_to_memory(args):
     """
     1つの文章を音声データとしてメモリに生成する（並列処理用）
-    WAVファイルをバイナリデータとして返す
+    名前付きパイプ(FIFO)を使用してメモリ上でデータをやり取り
     
     Args:
         args (tuple): (index, sentence, voice)
@@ -53,43 +52,48 @@ def generate_audio_to_memory(args):
     """
     i, sentence, voice = args
     
-    # 一時ファイルを作成
-    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
-        tmp_path = tmp_file.name
+    import tempfile
     
-    try:
-        # sayコマンドで一時ファイルに出力
-        subprocess.run(
-            ["say", "-r", "500", "-v", voice, "-o", tmp_path, "--data-format=LEF32@22050", sentence],
-            check=True,
-            capture_output=True,
-            timeout=60  # 秒
-        )
+    # 一時ディレクトリに名前付きパイプを作成
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fifo_path = os.path.join(tmpdir, f'speech_{i}.fifo')
         
-        # WAVファイルをバイナリとして読み込み
-        with open(tmp_path, 'rb') as f:
-            wav_bytes = f.read()
+        try:
+            # FIFOを作成（メモリ上でのパイプ通信）
+            os.mkfifo(fifo_path)
+            
+            # sayコマンドをバックグラウンドで起動
+            # --data-formatを削除し、デフォルトのAIFFフォーマットを使用
+            process = subprocess.Popen(
+                ["say", "-r", "500", "-v", voice, "-o", fifo_path, sentence],
+                stderr=subprocess.PIPE
+            )
+            
+            # FIFOからデータを読み込み（メモリ上の通信）
+            with open(fifo_path, 'rb') as fifo:
+                wav_bytes = fifo.read()
+            
+            # プロセスの終了を待つ
+            return_code = process.wait(timeout=30)
+            
+            if return_code != 0:
+                stderr = process.stderr.read().decode('utf-8', errors='ignore')
+                return (False, i, None, f"sayコマンドエラー: {stderr}")
+            
+            return (True, i, wav_bytes, None)
         
-        # 一時ファイルを削除
-        os.unlink(tmp_path)
-        
-        return (True, i, wav_bytes, None)
-    
-    except subprocess.CalledProcessError as e:
-        # エラー時も一時ファイルを削除
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        return (False, i, None, str(e))
-    except Exception as e:
-        # エラー時も一時ファイルを削除
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        return (False, i, None, str(e))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return (False, i, None, "タイムアウト: 30秒以内に完了しませんでした")
+        except Exception as e:
+            if process.poll() is None:
+                process.kill()
+            return (False, i, None, str(e))
 
 
 def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None):
     """
-    文章リストをsayコマンドで音声データに並列変換（バイナリで保持）
+    文章リストをsayコマンドで音声データに並列変換（完全メモリ処理）
     
     Args:
         sentences (list): 文章のリスト
@@ -105,7 +109,7 @@ def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None)
     
     print(f"\n音声データの生成を開始します（全{len(sentences)}ファイル）...")
     print(f"並列処理: {max_workers}ワーカーを使用")
-    print(f"方式: バイナリデータとしてメモリに保持\n")
+    print(f"方式: 名前付きパイプ(FIFO)でメモリ上のデータ転送（ディスクI/O不要）\n")
     
     # 並列処理用の引数リストを作成
     tasks = [(i, sentence, voice) for i, sentence in enumerate(sentences)]
@@ -144,69 +148,76 @@ def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None)
 
 def concatenate_wav_binary(wav_bytes_list, output_filename):
     """
-    WAVファイルのバイナリデータを直接連結（超高速）
+    AIFF/WAVファイルのバイナリデータを直接連結（超高速）
     
     Args:
-        wav_bytes_list (list): WAVファイルのバイト列リスト
+        wav_bytes_list (list): AIFF/WAVファイルのバイト列リスト
         output_filename (str): 出力ファイル名
     """
     if not wav_bytes_list:
         print("連結するデータがありません。")
         return
     
-    print(f"\nWAVファイルをバイナリレベルで連結中...")
+    print(f"\nAIFF/WAVファイルをバイナリレベルで連結中...")
     print(f"方式: ヘッダー除去 + バイト列連結（超高速）")
     
     try:
         start_time = time.time()
         
         # 最初のファイルからヘッダー情報を取得
-        first_wav = wav_bytes_list[0]
+        first_audio = wav_bytes_list[0]
         
-        # WAVヘッダーを解析（RIFF形式）
-        # 参考: http://soundfile.sapp.org/doc/WaveFormat/
+        # フォーマット判定（RIFF=WAV, FORM=AIFF）
+        is_wav = first_audio[:4] == b'RIFF'
+        is_aiff = first_audio[:4] == b'FORM'
         
-        # RIFFヘッダーを確認
-        if first_wav[:4] != b'RIFF':
-            raise ValueError("最初のファイルが有効なWAVファイルではありません")
+        if not (is_wav or is_aiff):
+            raise ValueError("最初のファイルが有効なWAV/AIFFファイルではありません")
         
-        # fmtチャンクを探す（通常は12バイト目から）
-        fmt_index = first_wav.find(b'fmt ')
-        data_index = first_wav.find(b'data')
+        file_format = "WAV" if is_wav else "AIFF"
+        print(f"  検出されたフォーマット: {file_format}")
         
-        if fmt_index == -1 or data_index == -1:
-            raise ValueError("WAVファイルのフォーマットが不正です")
+        # データチャンクを探す
+        if is_wav:
+            data_marker = b'data'
+        else:  # AIFF
+            data_marker = b'SSND'
         
-        # dataチャンクのヘッダーサイズを取得（通常44バイト）
-        header_size = data_index + 8  # 'data' + サイズ(4バイト) = 8バイト
+        data_index = first_audio.find(data_marker)
+        
+        if data_index == -1:
+            raise ValueError(f"{file_format}ファイルのデータチャンクが見つかりません")
+        
+        # AIFFの場合、SSNDチャンクには8バイトのヘッダー情報がある
+        if is_aiff:
+            # SSND + サイズ(4) + offset(4) + blockSize(4) = 16バイト
+            header_size = data_index + 16
+        else:
+            # data + サイズ(4) = 8バイト
+            header_size = data_index + 8
         
         print(f"  ヘッダーサイズ: {header_size}バイト")
         print(f"  連結対象: {len(wav_bytes_list)}ファイル")
         
         # 最初のファイルのヘッダーを保持
-        header = first_wav[:header_size]
+        header = first_audio[:header_size]
         
         # 全てのPCMデータを連結
         pcm_data = bytearray()
-        skipped_empty = 0
         
-        for i, wav_bytes in enumerate(wav_bytes_list):
-            # 各ファイルのdataチャンクを探す
-            file_data_index = wav_bytes.find(b'data')
+        for i, audio_bytes in enumerate(wav_bytes_list):
+            # 各ファイルのデータチャンクを探す
+            file_data_index = audio_bytes.find(data_marker)
             if file_data_index == -1:
-                print(f"  警告: ファイル{i}のdataチャンクが見つかりません。スキップします。")
+                print(f"  警告: ファイル{i}のデータチャンクが見つかりません。スキップします。")
                 continue
             
-            file_header_size = file_data_index + 8
-            pcm_chunk = wav_bytes[file_header_size:]
-            
-            # 0バイトデータをスキップ
-            if len(pcm_chunk) == 0:
-                print(f"  警告: ファイル{i}のPCMデータが0バイトです。スキップします。")
-                skipped_empty += 1
-                continue
-            
-            pcm_data.extend(pcm_chunk)
+            if is_aiff:
+                file_header_size = file_data_index + 16
+            else:
+                file_header_size = file_data_index + 8
+                
+            pcm_data.extend(audio_bytes[file_header_size:])
             
             if (i + 1) % 500 == 0:
                 print(f"  {i + 1}/{len(wav_bytes_list)} ファイル処理済み...")
@@ -214,26 +225,36 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
         concat_time = time.time() - start_time
         print(f"  バイト列連結完了: {concat_time:.2f}秒")
         
-        if skipped_empty > 0:
-            print(f"  スキップした0バイトファイル: {skipped_empty}個")
-        
         # 新しいヘッダーを作成（ファイルサイズを更新）
         total_data_size = len(pcm_data)
-        total_file_size = header_size - 8 + total_data_size  # RIFF識別子とサイズフィールドを除く
         
         # ヘッダーを更新
         new_header = bytearray(header)
         
-        # RIFFチャンクサイズを更新（4〜7バイト目）
-        new_header[4:8] = struct.pack('<I', total_file_size)
-        
-        # dataチャンクサイズを更新（dataチャンク位置+4バイト目から4バイト）
-        data_size_offset = data_index + 4
-        new_header[data_size_offset:data_size_offset+4] = struct.pack('<I', total_data_size)
+        if is_wav:
+            # WAVの場合
+            total_file_size = header_size - 8 + total_data_size
+            # RIFFチャンクサイズを更新（4〜7バイト目）
+            new_header[4:8] = struct.pack('<I', total_file_size)
+            # dataチャンクサイズを更新
+            data_size_offset = data_index + 4
+            new_header[data_size_offset:data_size_offset+4] = struct.pack('<I', total_data_size)
+        else:
+            # AIFFの場合
+            total_file_size = header_size - 8 + total_data_size
+            # FORMチャンクサイズを更新（4〜7バイト目、ビッグエンディアン）
+            new_header[4:8] = struct.pack('>I', total_file_size)
+            # SSNDチャンクサイズを更新（ビッグエンディアン）
+            ssnd_size_offset = data_index + 4
+            new_header[ssnd_size_offset:ssnd_size_offset+4] = struct.pack('>I', total_data_size + 8)
         
         # ファイルに書き出し
         print(f"\n最終ファイルを書き出し中...")
         write_start = time.time()
+        
+        # 出力ファイル名の拡張子を適切に設定
+        if is_aiff and not output_filename.endswith('.aiff'):
+            output_filename = output_filename.replace('.wav', '.aiff')
         
         with open(output_filename, 'wb') as f:
             f.write(new_header)
@@ -242,8 +263,11 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
         write_time = time.time() - write_start
         total_time = time.time() - start_time
         
-        # 再生時間を計算（32bit float @ 22050Hz = 4バイト/サンプル）
-        duration_seconds = total_data_size / (4 * 22050)
+        # 再生時間を計算（フォーマットに応じて）
+        # デフォルトAIFF: 16bit @ 22050Hz = 2バイト/サンプル
+        bytes_per_sample = 2
+        sample_rate = 22050
+        duration_seconds = total_data_size / (bytes_per_sample * sample_rate)
         
         print(f"✓ 連結完了: {output_filename}")
         print(f"  ファイルサイズ: {os.path.getsize(output_filename) / (1024*1024):.2f} MB")
@@ -257,6 +281,8 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
     except Exception as e:
         print(f"✗ 連結エラー: {e}")
         import traceback
+        traceback.print_exc()
+        traceback.print_exc()
 
 # 使用例
 if __name__ == "__main__":
@@ -291,13 +317,13 @@ if __name__ == "__main__":
         # 処理時間を計測
         start_time = time.time()
         
-        # 音声データをバイナリとして並列生成
+        # 音声データをパイプ経由で並列生成（ファイルI/O完全省略）
         wav_bytes_list = convert_to_audio_parallel_memory(sentences, max_workers=None)
         
         generation_time = time.time() - start_time
         
         if wav_bytes_list:
-            output_filename = f"{pdf_file}.wav"
+            output_filename = f"{pdf_file}.aiff"  # AIFFフォーマットで出力
             
             # バイナリレベルで超高速連結
             concatenate_wav_binary(wav_bytes_list, output_filename)

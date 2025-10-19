@@ -1,6 +1,7 @@
-import PyPDF2
+import pdfplumber
 import subprocess
 import os
+import sys
 
 def extract_sentences_from_pdf(pdf_path):
     """
@@ -15,16 +16,11 @@ def extract_sentences_from_pdf(pdf_path):
     sentences = []
     
     try:
-        # PDFファイルを開く
-        with open(pdf_path, 'rb') as file:
-            # PDFリーダーオブジェクトを作成
-            pdf_reader = PyPDF2.PdfReader(file)
-            
-            # 全ページからテキストを抽出
+        with pdfplumber.open(pdf_path) as pdf:
             full_text = ""
-            for page in pdf_reader.pages:
-                full_text += page.extract_text()
-            
+            for page in pdf.pages:
+               full_text += page.extract_text()
+        
             # 句点（。）で分割
             sentences = [s.strip() + '。' for s in full_text.split('。') if s.strip()]
     
@@ -59,7 +55,7 @@ def convert_to_audio(sentences, output_dir="out", voice="Kyoko"):
         try:
             # sayコマンドを実行
             subprocess.run(
-                ["say", "-v", voice, "-o", output_file, "--data-format=LEF32@22050", sentence],
+                ["say", "-r", "500" , "-v", voice, "-o", output_file, "--data-format=LEF32@22050", sentence],
                 check=True
             )
             print(f"✓ 生成完了: {output_file}")
@@ -76,7 +72,7 @@ def convert_to_audio(sentences, output_dir="out", voice="Kyoko"):
 # 使用例
 if __name__ == "__main__":
     # PDFファイルのパスを指定
-    pdf_file = "sample.pdf"
+    pdf_file = sys.argv[1]
     
     # 文章を抽出
     print("PDFから文章を抽出中...")

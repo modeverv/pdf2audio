@@ -1,3 +1,5 @@
 *.pdf
 *.wav
 *.txt
+*.aiff
+*.log

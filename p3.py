@@ -6,6 +6,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import tempfile
 import time
+import sys
+import pdfplumber
 
 def extract_sentences_from_pdf(pdf_path):
     """
@@ -21,14 +23,10 @@ def extract_sentences_from_pdf(pdf_path):
     
     try:
         # PDFファイルを開く
-        with open(pdf_path, 'rb') as file:
-            # PDFリーダーオブジェクトを作成
-            pdf_reader = PyPDF2.PdfReader(file)
-            
-            # 全ページからテキストを抽出
+        with pdfplumber.open(pdf_path) as pdf:
             full_text = ""
-            for page in pdf_reader.pages:
-                full_text += page.extract_text()
+            for page in pdf.pages:
+               full_text += page.extract_text()
             
             # 句点（。）で分割
             sentences = [s.strip() + '。' for s in full_text.split('。') if s.strip()]
@@ -61,9 +59,10 @@ def generate_audio_to_memory(args):
     try:
         # sayコマンドで一時ファイルに出力
         subprocess.run(
-            ["say","-r", "400", "-v", voice, "-o", tmp_path, "--data-format=LEF32@22050", sentence],
+            ["say","-r", "500", "-v", voice, "-o", tmp_path, "--data-format=LEF32@22050", sentence],
             check=True,
-            capture_output=True
+            capture_output=True,
+            timeout=60  # 秒
         )
         
         # 一時ファイルをメモリに読み込み
@@ -201,7 +200,7 @@ def concatenate_audio_segments(audio_segments, output_filename):
 # 使用例
 if __name__ == "__main__":
     # PDFファイルのパスを指定
-    pdf_file = "sample.pdf"
+    pdf_file = sys.argv[1]
     
     # 文章を抽出
     print("PDFから文章を抽出中...")
