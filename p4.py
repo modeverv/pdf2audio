@@ -60,7 +60,7 @@ def generate_audio_to_memory(args):
     try:
         # sayコマンドで一時ファイルに出力
         subprocess.run(
-            ["say", "-r", "500", "-v", voice, "-o", tmp_path, "--data-format=LEF32@22050", sentence],
+            ["say", "-r", "200", "-v", voice, "-o", tmp_path, "--data-format=LEF32@22050", sentence],
             check=True,
             capture_output=True,
             timeout=60  # 秒
@@ -220,7 +220,13 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
         # 新しいヘッダーを作成（ファイルサイズを更新）
         total_data_size = len(pcm_data)
         total_file_size = header_size - 8 + total_data_size  # RIFF識別子とサイズフィールドを除く
-        
+
+        if not (0 <= total_data_size <= 4294967295):
+            total_data_size = 100
+
+        if not (0 <= total_file_size <= 4294967295):
+            total_file_size = 100
+            
         # ヘッダーを更新
         new_header = bytearray(header)
         

@@ -275,7 +275,7 @@ async def main():
     pdf_file = "sample.pdf"
     
     # VoiceVox設定
-    VOICEVOX_URL = "http://127.0.0.1:50021"
+    VOICEVOX_URL = "http://192.168.11.82:50021"
     SPEAKER_ID = 1  # 1=ずんだもん（ノーマル）
     MAX_CONCURRENT = 100  # 同時接続数（必要に応じて調整）
     

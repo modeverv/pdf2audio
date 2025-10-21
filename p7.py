@@ -66,7 +66,7 @@ def generate_audio_to_memory(args):
             # --data-formatを削除し、デフォルトのAIFFフォーマットを使用
             process = subprocess.Popen(
                 ["say", "-r", "500", "-v", voice, "-o", fifo_path, sentence],
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
             )
             
             # FIFOからデータを読み込み（メモリ上の通信）
@@ -74,7 +74,7 @@ def generate_audio_to_memory(args):
                 wav_bytes = fifo.read()
             
             # プロセスの終了を待つ
-            return_code = process.wait(timeout=30)
+            return_code = process.wait(timeout=60)
             
             if return_code != 0:
                 stderr = process.stderr.read().decode('utf-8', errors='ignore')
@@ -173,6 +173,8 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
         
         if not (is_wav or is_aiff):
             raise ValueError("最初のファイルが有効なWAV/AIFFファイルではありません")
+
+            
         
         file_format = "WAV" if is_wav else "AIFF"
         print(f"  検出されたフォーマット: {file_format}")
