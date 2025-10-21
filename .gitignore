@@ -3,3 +3,4 @@
 *.txt
 *.aiff
 *.log
+/venv

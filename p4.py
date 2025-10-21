@@ -145,6 +145,7 @@ def convert_to_audio_parallel_memory(sentences, voice="Kyoko", max_workers=None)
 def concatenate_wav_binary(wav_bytes_list, output_filename):
     """
     WAVファイルのバイナリデータを直接連結（超高速）
+    4GB以上のファイルの場合はRF64形式で出力
     
     Args:
         wav_bytes_list (list): WAVファイルのバイト列リスト
@@ -155,7 +156,7 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
         return
     
     print(f"\nWAVファイルをバイナリレベルで連結中...")
-    print(f"方式: ヘッダー除去 + バイト列連結（超高速）")
+    print(f"方式: ヘッダー除去 + バイト列連結（超高速・RF64対応）")
     
     try:
         start_time = time.time()
@@ -165,6 +166,7 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
         
         # WAVヘッダーを解析（RIFF形式）
         # 参考: http://soundfile.sapp.org/doc/WaveFormat/
+        # RF64参考: https://tech.ebu.ch/docs/tech/tech3306.pdf
         
         # RIFFヘッダーを確認
         if first_wav[:4] != b'RIFF':
@@ -183,8 +185,12 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
         print(f"  ヘッダーサイズ: {header_size}バイト")
         print(f"  連結対象: {len(wav_bytes_list)}ファイル")
         
-        # 最初のファイルのヘッダーを保持
+        # 最初のファイルのヘッダーを保持（fmtチャンク情報用）
         header = first_wav[:header_size]
+        
+        # fmtチャンクを抽出（RF64でも必要）
+        fmt_size = struct.unpack('<I', first_wav[fmt_index+4:fmt_index+8])[0]
+        fmt_chunk = first_wav[fmt_index:fmt_index+8+fmt_size]
         
         # 全てのPCMデータを連結
         pcm_data = bytearray()
@@ -217,25 +223,69 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
         if skipped_empty > 0:
             print(f"  スキップした0バイトファイル: {skipped_empty}個")
         
-        # 新しいヘッダーを作成（ファイルサイズを更新）
+        # データサイズを計算
         total_data_size = len(pcm_data)
-        total_file_size = header_size - 8 + total_data_size  # RIFF識別子とサイズフィールドを除く
-
-        if not (0 <= total_data_size <= 4294967295):
-            total_data_size = 100
-
-        if not (0 <= total_file_size <= 4294967295):
-            total_file_size = 100
+        
+        # 4GB制限チェック（4294967295バイト = 0xFFFFFFFF）
+        use_rf64 = total_data_size > 0xFFFFFFFF
+        
+        if use_rf64:
+            print(f"\n  ファイルサイズが4GBを超えるため、RF64形式で出力します")
             
-        # ヘッダーを更新
-        new_header = bytearray(header)
-        
-        # RIFFチャンクサイズを更新（4〜7バイト目）
-        new_header[4:8] = struct.pack('<I', total_file_size)
-        
-        # dataチャンクサイズを更新（dataチャンク位置+4バイト目から4バイト）
-        data_size_offset = data_index + 4
-        new_header[data_size_offset:data_size_offset+4] = struct.pack('<I', total_data_size)
+            # RF64ヘッダーを構築
+            # RF64構造:
+            # RF64 (4) + file_size_placeholder (4) + WAVE (4)
+            # ds64 (4) + ds64_size (4) + riff_size (8) + data_size (8) + sample_count (8) + table_length (4)
+            # fmt チャンク
+            # data (4) + data_size_placeholder (4) + PCM data
+            
+            new_header = bytearray()
+            
+            # RF64チャンク識別子
+            new_header.extend(b'RF64')
+            # ファイルサイズ（プレースホルダー: 0xFFFFFFFF）
+            new_header.extend(struct.pack('<I', 0xFFFFFFFF))
+            # WAVEフォーマット識別子
+            new_header.extend(b'WAVE')
+            
+            # ds64チャンク（Data Size 64）を作成
+            new_header.extend(b'ds64')
+            # ds64チャンクサイズ（28バイト: riff_size(8) + data_size(8) + sample_count(8) + table_length(4)）
+            new_header.extend(struct.pack('<I', 28))
+            # RIFF/RF64チャンクサイズ（64ビット）
+            rf64_chunk_size = 4 + len(fmt_chunk) + 8 + 28 + 8 + total_data_size  # WAVE + fmt + ds64 + data header + data
+            new_header.extend(struct.pack('<Q', rf64_chunk_size))
+            # dataチャンクサイズ（64ビット）
+            new_header.extend(struct.pack('<Q', total_data_size))
+            # サンプル数（64ビット）- 32bit float, モノラルと仮定
+            sample_count = total_data_size // 4
+            new_header.extend(struct.pack('<Q', sample_count))
+            # テーブル長（0 = テーブルなし）
+            new_header.extend(struct.pack('<I', 0))
+            
+            # fmtチャンクを追加
+            new_header.extend(fmt_chunk)
+            
+            # dataチャンクヘッダー
+            new_header.extend(b'data')
+            # dataチャンクサイズ（プレースホルダー: 0xFFFFFFFF）
+            new_header.extend(struct.pack('<I', 0xFFFFFFFF))
+            
+        else:
+            # 標準WAV形式
+            print(f"\n  標準WAV形式で出力します")
+            
+            total_file_size = header_size - 8 + total_data_size  # RIFF識別子とサイズフィールドを除く
+            
+            # ヘッダーを更新
+            new_header = bytearray(header)
+            
+            # RIFFチャンクサイズを更新（4〜7バイト目）
+            new_header[4:8] = struct.pack('<I', total_file_size)
+            
+            # dataチャンクサイズを更新（dataチャンク位置+4バイト目から4バイト）
+            data_size_offset = data_index + 4
+            new_header[data_size_offset:data_size_offset+4] = struct.pack('<I', total_data_size)
         
         # ファイルに書き出し
         print(f"\n最終ファイルを書き出し中...")
@@ -251,7 +301,8 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
         # 再生時間を計算（32bit float @ 22050Hz = 4バイト/サンプル）
         duration_seconds = total_data_size / (4 * 22050)
         
-        print(f"✓ 連結完了: {output_filename}")
+        format_type = "RF64" if use_rf64 else "WAV"
+        print(f"✓ 連結完了 ({format_type}形式): {output_filename}")
         print(f"  ファイルサイズ: {os.path.getsize(output_filename) / (1024*1024):.2f} MB")
         print(f"  PCMデータサイズ: {total_data_size / (1024*1024):.2f} MB")
         print(f"  再生時間: {duration_seconds / 60:.2f} 分")
@@ -263,6 +314,7 @@ def concatenate_wav_binary(wav_bytes_list, output_filename):
     except Exception as e:
         print(f"✗ 連結エラー: {e}")
         import traceback
+        traceback.print_exc()
 
 # 使用例
 if __name__ == "__main__":
